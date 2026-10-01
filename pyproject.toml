@@ -24,3 +24,4 @@ ignore = ["B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]  # import the package from the checkout, also with plain `pytest`
