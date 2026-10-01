@@ -8,20 +8,25 @@
 """ASGI middleware that rejects requests before their body is read."""
 from __future__ import annotations
 
+import base64
+import binascii
 import secrets
 
 from starlette.exceptions import HTTPException
 
 from .errors import error_response
 
-PUBLIC_PATHS = {"/health", "/ready", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+PUBLIC_PATHS = {"/health", "/ready", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json", "/live"}
+WS_KEY_PREFIX = "bearer."
 
 
 class ApiKeyMiddleware:
     """Requires `Authorization: Bearer <API_KEY>` on every path except PUBLIC_PATHS.
 
     Runs before body parsing, so unauthenticated uploads are refused without
-    being received.
+    being received. WebSockets also accept the key as a subprotocol,
+    "bearer.<base64url(API_KEY)>", because browsers can't set headers on them
+    (and a query string would end up in access logs).
     """
 
     def __init__(self, app, api_key: str):
@@ -33,7 +38,28 @@ class ApiKeyMiddleware:
         # The scheme name is case-insensitive (RFC 9110); the key itself is not.
         return scheme.lower() == b"bearer" and secrets.compare_digest(token.strip(), self.expected)
 
+    def _authorized_ws(self, scope) -> bool:
+        for name, value in scope["headers"]:
+            if name == b"authorization" and self._authorized(value):
+                return True
+        for protocol in scope.get("subprotocols", []):
+            if protocol.startswith(WS_KEY_PREFIX):
+                encoded = protocol[len(WS_KEY_PREFIX) :]
+                try:
+                    key = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+                except (binascii.Error, ValueError):
+                    continue
+                if secrets.compare_digest(key, self.expected):
+                    return True
+        return False
+
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            if self._authorized_ws(scope):
+                await self.app(scope, receive, send)
+            else:
+                await send({"type": "websocket.close", "code": 1008})  # handshake answered with 403
+            return
         if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
             await self.app(scope, receive, send)
             return

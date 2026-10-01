@@ -23,7 +23,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, routes_native, routes_openai
+from . import __version__, routes_native, routes_openai, routes_stream
 from .config import Settings
 from .engine import ModelManager, Transcriber
 from .errors import OPENAI_PREFIX, ServiceError, error_response, render_service_error
@@ -49,10 +49,12 @@ def configure_logging(level: str) -> None:
 def create_app(
     settings: Settings | None = None,
     loader: Callable[[ModelManager], Any] | None = None,
+    translation_loader: Callable[[], Any] | None = None,
+    speaker_loader: Callable[[], Any] | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     configure_logging(settings.log_level)
-    transcriber = Transcriber(settings, loader)
+    transcriber = Transcriber(settings, loader, translation_loader, speaker_loader)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -78,6 +80,7 @@ def create_app(
     app.state.transcriber = transcriber
     app.include_router(routes_native.router)
     app.include_router(routes_openai.router)
+    app.include_router(routes_stream.router)
 
     # Order matters: the last one added runs first, so auth rejects before any body is read.
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_upload_bytes)
@@ -112,5 +115,9 @@ def create_app(
         max_upload_bytes=settings.max_upload_bytes,
         auth=bool(settings.api_key),
         preload=settings.preload,
+        max_streams=settings.max_streams,
+        allow_urls=settings.allow_urls,
+        translation_model=settings.translation_model,
+        diarization=f"{settings.diarization_method}/{settings.diarization_model}",
     )
     return app

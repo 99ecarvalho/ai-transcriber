@@ -9,3 +9,10 @@ uvicorn[standard]==0.32.0
 python-multipart==0.0.17
 structlog==24.4.0
 huggingface-hub<1.0
+# Live streaming (WebSocket server via uvicorn, and the bundled client).
+# 16.1.1 is the newest release with Python 3.10 wheels.
+websockets==16.1.1
+# Speaker identification: ONNX speaker models, no PyTorch needed.
+sherpa-onnx==1.13.8
+# Translation: tokenizer for the M2M100 / NLLB models (run on CTranslate2).
+sentencepiece==0.2.2

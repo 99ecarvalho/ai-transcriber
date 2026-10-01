@@ -1,0 +1,247 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+
+  This file is part of ai-transcriber. It is free software, licensed under the
+  GNU Lesser General Public License v3.0 or later. See COPYING.LESSER and
+  COPYING for details.
+
+  SPDX-License-Identifier: LGPL-3.0-or-later
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Transcription</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b73; --border: #d9d9de;
+    --accent: #2f6fde; --accent-text: #ffffff; --danger: #c93a3a; --partial: #8a8a93;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --panel: #1d1d20; --text: #ececf0; --muted: #9a9aa3; --border: #34343a;
+      --accent: #5b8ff0; --accent-text: #0d0d0f; --danger: #ef6b6b; --partial: #7c7c86;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .controls { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 14px; }
+  input[type=text], input[type=password], select {
+    font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 9px; width: 100%; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text);
+           border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: var(--muted); font-size: 13px; }
+  #status.error { color: var(--danger); }
+  #transcript { margin-top: 14px; min-height: 240px; max-height: 65vh; overflow-y: auto; }
+  .line { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .line:last-child { border-bottom: 0; }
+  .meta { font-size: 12px; color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; }
+  .speaker { font-size: 12px; font-weight: 600; border-radius: 4px; padding: 1px 6px; margin-right: 6px; }
+  .translation { color: var(--muted); margin-top: 2px; }
+  #partial { color: var(--partial); font-style: italic; padding-top: 6px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+  fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  legend { font-size: 13px; color: var(--muted); padding: 0; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Live transcription</h1>
+  <div class="panel">
+    <div class="controls">
+      <fieldset>
+        <legend>Audio source</legend>
+        <label class="check"><input type="checkbox" id="srcMic" checked> Microphone</label>
+        <label class="check"><input type="checkbox" id="srcTab"> Tab or screen audio (meetings, videos)</label>
+      </fieldset>
+      <label>…or a stream URL the server should listen to
+        <input type="text" id="url" placeholder="https://example.com/live.m3u8" autocomplete="off">
+      </label>
+      <label>Spoken language
+        <select id="language"></select>
+      </label>
+      <label>Translate to
+        <select id="translateTo"></select>
+      </label>
+      <label>API key (if the server needs one)
+        <input type="password" id="apiKey" autocomplete="off">
+      </label>
+      <fieldset>
+        <legend>Options</legend>
+        <label class="check"><input type="checkbox" id="diarize"> Show who is speaking</label>
+      </fieldset>
+    </div>
+    <div class="row">
+      <button class="primary" id="start">Start</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="download" disabled>Download transcript</button>
+      <button id="clear">Clear</button>
+      <span id="status">Idle.</span>
+    </div>
+    <p class="hint">For a meeting in another tab (Meet, Teams, Zoom web), tick both sources and choose that tab
+      with “Share tab audio” on: you get the other participants from the tab and yourself from the microphone.</p>
+  </div>
+  <div class="panel" id="transcript"><div id="lines"></div><div id="partial"></div></div>
+</main>
+<script>
+"use strict";
+const LANGS = [["", "Auto-detect"], ["en", "English"], ["pt", "Portuguese"], ["es", "Spanish"], ["fr", "French"],
+  ["de", "German"], ["it", "Italian"], ["nl", "Dutch"], ["pl", "Polish"], ["ru", "Russian"], ["uk", "Ukrainian"],
+  ["tr", "Turkish"], ["ar", "Arabic"], ["hi", "Hindi"], ["ja", "Japanese"], ["ko", "Korean"], ["zh", "Chinese"],
+  ["sv", "Swedish"], ["da", "Danish"], ["fi", "Finnish"], ["no", "Norwegian"], ["cs", "Czech"], ["el", "Greek"],
+  ["he", "Hebrew"], ["id", "Indonesian"], ["vi", "Vietnamese"], ["th", "Thai"], ["ro", "Romanian"], ["hu", "Hungarian"]];
+const $ = (id) => document.getElementById(id);
+const fill = (select, first) => {
+  select.append(new Option(first, ""));
+  for (const [code, name] of LANGS.slice(1)) select.append(new Option(name, code));
+};
+fill($("language"), "Auto-detect");
+fill($("translateTo"), "No translation");
+try { $("apiKey").value = sessionStorage.getItem("transcriber.apiKey") || ""; } catch (e) {}
+
+let ws = null, ctx = null, mediaStreams = [], lines = [];
+const speakerColors = {};
+const palette = ["#2f6fde", "#c25b12", "#14866d", "#a2329e", "#8a6d00", "#b3263b", "#4b5bb3", "#2c7a2c"];
+
+function status(text, isError = false) { $("status").textContent = text; $("status").className = isError ? "error" : ""; }
+function fmt(t) { const m = Math.floor(t / 60), s = Math.floor(t % 60); return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`; }
+function b64url(text) {
+  const bytes = new TextEncoder().encode(text); let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function addFinal(ev) {
+  lines.push(ev);
+  const div = document.createElement("div"); div.className = "line";
+  const meta = document.createElement("span"); meta.className = "meta"; meta.textContent = fmt(ev.start);
+  div.append(meta);
+  if (ev.speaker) {
+    if (!(ev.speaker in speakerColors)) speakerColors[ev.speaker] = palette[Object.keys(speakerColors).length % palette.length];
+    const sp = document.createElement("span"); sp.className = "speaker";
+    sp.textContent = ev.speaker.replace("SPEAKER_", "Speaker ");
+    sp.style.color = speakerColors[ev.speaker]; sp.style.border = `1px solid ${speakerColors[ev.speaker]}`;
+    div.append(sp);
+  }
+  div.append(document.createTextNode(ev.text));
+  if (ev.translation) {
+    const tr = document.createElement("div"); tr.className = "translation"; tr.textContent = ev.translation; div.append(tr);
+  }
+  $("lines").append(div);
+  $("partial").textContent = "";
+  $("transcript").scrollTop = $("transcript").scrollHeight;
+  $("download").disabled = false;
+}
+
+function onEvent(ev) {
+  if (ev.type === "loading") status(ev.message);
+  else if (ev.type === "ready") status("Listening…");
+  else if (ev.type === "language") status(`Listening… (language: ${ev.language})`);
+  else if (ev.type === "partial") { $("partial").textContent = ev.text; $("transcript").scrollTop = $("transcript").scrollHeight; }
+  else if (ev.type === "final") addFinal(ev);
+  else if (ev.type === "error") status(ev.message, true);
+  else if (ev.type === "end") status(`Finished (${fmt(ev.duration)} of audio).`);
+}
+
+const WORKLET = `
+class Tap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = []; this.len = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) { this.buf.push(new Float32Array(ch)); this.len += ch.length; }
+    if (this.len >= sampleRate / 10) {           // ~100 ms per message
+      const out = new Int16Array(this.len); let o = 0;
+      for (const b of this.buf) for (let i = 0; i < b.length; i++) {
+        const s = Math.max(-1, Math.min(1, b[i])); out[o++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      this.port.postMessage(out.buffer, [out.buffer]); this.buf = []; this.len = 0;
+    }
+    return true;
+  }
+}
+registerProcessor("tap", Tap);`;
+
+async function captureAudio() {
+  const wantMic = $("srcMic").checked, wantTab = $("srcTab").checked;
+  if (!wantMic && !wantTab) throw new Error("Choose at least one audio source, or enter a URL.");
+  if (!navigator.mediaDevices) throw new Error("Audio capture needs a secure page: open it via https:// or http://localhost.");
+  ctx = new AudioContext();
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+  const mix = ctx.createGain();
+  if (wantTab) {
+    const tab = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    if (!tab.getAudioTracks().length) { tab.getTracks().forEach((t) => t.stop()); throw new Error("No audio in the shared tab: tick “Share tab audio”."); }
+    mediaStreams.push(tab);
+    ctx.createMediaStreamSource(new MediaStream(tab.getAudioTracks())).connect(mix);
+    tab.getAudioTracks()[0].addEventListener("ended", stop);
+  }
+  if (wantMic) {
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    mediaStreams.push(mic);
+    ctx.createMediaStreamSource(mic).connect(mix);
+  }
+  const tap = new AudioWorkletNode(ctx, "tap", { channelCount: 1, channelCountMode: "explicit" });
+  mix.connect(tap);
+  // Browsers only render nodes that reach the destination; route through a muted gain.
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  tap.connect(mute).connect(ctx.destination);
+  tap.port.onmessage = (e) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data); };
+  return ctx.sampleRate;
+}
+
+async function start() {
+  $("start").disabled = true; status("Connecting…");
+  const key = $("apiKey").value.trim();
+  try { sessionStorage.setItem("transcriber.apiKey", key); } catch (e) {}
+  const url = $("url").value.trim();
+  try {
+    const sampleRate = url ? 16000 : await captureAudio();
+    const protocols = ["transcriber.v1"]; if (key) protocols.push("bearer." + b64url(key));
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/stream`, protocols);
+    ws.onopen = () => ws.send(JSON.stringify({
+      type: "start", sample_rate: sampleRate, url: url || null,
+      language: $("language").value || null, translate_to: $("translateTo").value || null,
+      diarize: $("diarize").checked,
+    }));
+    ws.onmessage = (e) => onEvent(JSON.parse(e.data));
+    ws.onclose = (e) => { if (e.code === 1006 && !lines.length) status("Connection refused (wrong API key?).", true); cleanup(); };
+    $("stop").disabled = false;
+  } catch (err) { status(err.message || String(err), true); cleanup(); }
+}
+
+function stop() {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: "stop" })); status("Finishing…"); }
+  releaseAudio();
+}
+function releaseAudio() {
+  mediaStreams.forEach((s) => s.getTracks().forEach((t) => t.stop())); mediaStreams = [];
+  if (ctx) { ctx.close(); ctx = null; }
+}
+function cleanup() { releaseAudio(); ws = null; $("start").disabled = false; $("stop").disabled = true; }
+
+function download() {
+  const text = lines.map((l) => `[${fmt(l.start)}] ${l.speaker ? l.speaker + ": " : ""}${l.text}` +
+    (l.translation ? `\n         ${l.translation}` : "")).join("\n") + "\n";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = `transcript-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.txt`; a.click();
+}
+
+$("start").onclick = start;
+$("stop").onclick = stop;
+$("download").onclick = download;
+$("clear").onclick = () => { lines = []; $("lines").textContent = ""; $("partial").textContent = ""; $("download").disabled = true; };
+</script>
+</body>
+</html>

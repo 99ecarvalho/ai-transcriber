@@ -26,25 +26,47 @@ def _timestamp(seconds: float, decimal_marker: str) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}{decimal_marker}{ms:03d}"
 
 
+def _caption(s: Segment) -> str:
+    """Subtitle/text line: the translation when one was requested, prefixed by
+    the speaker when diarization was requested; otherwise just the text."""
+    text = (s.translation if s.translation is not None else s.text).strip()
+    return f"[{s.speaker}] {text}" if s.speaker else text
+
+
 def to_srt(segments: list[Segment]) -> str:
     blocks = [
-        f"{i}\n{_timestamp(s.start, ',')} --> {_timestamp(s.end, ',')}\n{s.text.strip()}\n"
+        f"{i}\n{_timestamp(s.start, ',')} --> {_timestamp(s.end, ',')}\n{_caption(s)}\n"
         for i, s in enumerate(segments, start=1)
     ]
     return "\n".join(blocks)
 
 
 def to_vtt(segments: list[Segment]) -> str:
-    blocks = [
-        f"{_timestamp(s.start, '.')} --> {_timestamp(s.end, '.')}\n{s.text.strip()}\n" for s in segments
-    ]
+    blocks = [f"{_timestamp(s.start, '.')} --> {_timestamp(s.end, '.')}\n{_caption(s)}\n" for s in segments]
     return "WEBVTT\n\n" + "\n".join(blocks)
+
+
+def to_text(result: TranscriptionResult) -> str:
+    if result.diarized:  # one line per speaker turn
+        lines: list[str] = []
+        current = None
+        for s in result.segments:
+            text = (s.translation if s.translation is not None else s.text).strip()
+            if s.speaker != current:
+                lines.append(f"{s.speaker}: {text}")
+                current = s.speaker
+            else:
+                lines[-1] += " " + text
+        return "\n".join(lines) + "\n"
+    if result.translation is not None:
+        return result.translation + "\n"
+    return result.text + "\n"
 
 
 def text_response(result: TranscriptionResult, response_format: str) -> Response | None:
     """Shared non-JSON formats; returns None for JSON formats."""
     if response_format == "text":
-        return PlainTextResponse(result.text + "\n")
+        return PlainTextResponse(to_text(result))
     if response_format == "srt":
         return PlainTextResponse(to_srt(result.segments))
     if response_format == "vtt":
@@ -58,13 +80,18 @@ def native_json(result: TranscriptionResult) -> dict[str, Any]:
     segments = []
     for s in result.segments:
         seg: dict[str, Any] = {"start": s.start, "end": s.end, "text": s.text}
+        # Optional fields appear only when requested, so default output is unchanged.
+        if s.speaker is not None:
+            seg["speaker"] = s.speaker
+        if s.translation is not None:
+            seg["translation"] = s.translation
         if s.words is not None:
             seg["words"] = [
                 {"start": w.start, "end": w.end, "word": w.word, "probability": round(w.probability, 3)}
                 for w in s.words
             ]
         segments.append(seg)
-    return {
+    body: dict[str, Any] = {
         "text": result.text,
         "language": result.language,
         "language_probability": round(result.language_probability, 3),
@@ -72,6 +99,16 @@ def native_json(result: TranscriptionResult) -> dict[str, Any]:
         "elapsed_ms": result.elapsed_ms,
         "segments": segments,
     }
+    if result.translation_language is not None:
+        body["translation"] = result.translation
+        body["translation_language"] = result.translation_language
+    if result.diarized:
+        body["speakers"] = sorted({s.speaker for s in result.segments if s.speaker}, key=_speaker_order)
+    return body
+
+
+def _speaker_order(label: str) -> int:
+    return int(label.rsplit("_", 1)[-1]) if label.rsplit("_", 1)[-1].isdigit() else 0
 
 
 def native_response(result: TranscriptionResult, response_format: str) -> Response:

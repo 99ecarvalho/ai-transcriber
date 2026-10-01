@@ -16,6 +16,13 @@ from dataclasses import dataclass
 
 MB = 1024 * 1024
 LOG_LEVELS = ("debug", "info", "warning", "error", "critical")  # names uvicorn accepts
+DIARIZATION_METHODS = ("segments", "pyannote")
+# Winners of the comparisons documented in the README.
+# NLLB-200 beat M2M100 on quality, speed and language coverage, but its weights are
+# CC-BY-NC-4.0 (non-commercial). M2M100 (MIT): "jncraton/m2m100_418M-ct2-int8".
+DEFAULT_TRANSLATION_MODEL = "JustFrederik/nllb-200-distilled-600M-ct2-int8"
+M2M100_TRANSLATION_MODEL = "jncraton/m2m100_418M-ct2-int8"
+DEFAULT_SPEAKER_MODEL = "3dspeaker_speech_eres2net_sv_en_voxceleb_16k"
 
 
 def _str(name: str, default: str | None = None) -> str | None:
@@ -74,6 +81,28 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # URL input (batch `url=` and live streams pulled by the server)
+    allow_urls: bool = False
+    allow_private_urls: bool = False
+    max_url_duration_sec: float = 4 * 3600
+
+    # Live streaming over WebSocket
+    max_streams: int = 2  # 0 disables /stream
+    stream_min_silence_ms: int = 600
+    stream_max_utterance_sec: float = 20.0
+    stream_partial_interval_sec: float = 1.0
+
+    # Translation to languages other than English (text step after transcription)
+    translation_model: str = DEFAULT_TRANSLATION_MODEL
+    translation_device: str = "auto"  # cuda | cpu | auto
+
+    # Speaker identification ("who is speaking")
+    diarization_method: str = "segments"  # segments | pyannote
+    diarization_model: str = DEFAULT_SPEAKER_MODEL
+    diarization_threshold: float = 0.5
+    diarization_cache_dir: str = "/cache/speaker"
+    diarization_threads: int = 2
+
     @classmethod
     def from_env(cls) -> Settings:
         device = (_str("WHISPER_DEVICE", "cuda") or "cuda").lower()
@@ -82,6 +111,13 @@ class Settings:
         log_level = (_str("LOG_LEVEL", "info") or "info").lower()
         if log_level not in LOG_LEVELS:
             raise ValueError(f"LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
+        translation_device = (_str("TRANSLATION_DEVICE", "auto") or "auto").lower()
+        if translation_device not in ("cuda", "cpu", "auto"):
+            raise ValueError(f"TRANSLATION_DEVICE must be cuda, cpu or auto, got {translation_device!r}")
+        diarization_method = (_str("DIARIZATION_METHOD", "segments") or "segments").lower()
+        if diarization_method not in DIARIZATION_METHODS:
+            choices = ", ".join(DIARIZATION_METHODS)
+            raise ValueError(f"DIARIZATION_METHOD must be one of {choices}, got {diarization_method!r}")
 
         return cls(
             model_name=_str("WHISPER_MODEL", "large-v3"),
@@ -100,4 +136,18 @@ class Settings:
             log_level=log_level,
             host=_str("HOST", "0.0.0.0"),
             port=_int("PORT", 8000, 1),
+            allow_urls=_bool("ALLOW_URLS", False),
+            allow_private_urls=_bool("ALLOW_PRIVATE_URLS", False),
+            max_url_duration_sec=_float("MAX_URL_DURATION_MIN", 240, 0.1) * 60,
+            max_streams=_int("MAX_STREAMS", 2, 0),
+            stream_min_silence_ms=_int("STREAM_MIN_SILENCE_MS", 600, 100),
+            stream_max_utterance_sec=_float("STREAM_MAX_UTTERANCE_SEC", 20.0, 2.0),
+            stream_partial_interval_sec=_float("STREAM_PARTIAL_INTERVAL_SEC", 1.0, 0.2),
+            translation_model=_str("TRANSLATION_MODEL", DEFAULT_TRANSLATION_MODEL),
+            translation_device=translation_device,
+            diarization_method=diarization_method,
+            diarization_model=_str("DIARIZATION_MODEL", DEFAULT_SPEAKER_MODEL),
+            diarization_threshold=_float("DIARIZATION_THRESHOLD", 0.5, 0.0),
+            diarization_cache_dir=_str("DIARIZATION_CACHE_DIR", "/cache/speaker"),
+            diarization_threads=_int("DIARIZATION_THREADS", 2, 1),
         )
