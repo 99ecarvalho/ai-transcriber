@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
+services:
+  transcriber:
+    build: .
+    image: ai-transcriber:latest
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
+      WHISPER_PRELOAD: ${WHISPER_PRELOAD:-1}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-200}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-1}
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - whisper-cache:/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  whisper-cache:

@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
+.git
+.github
+.venv
+venv
+tests
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+.env
+*.md
+docker-compose.yml

@@ -1,0 +1,6 @@
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
+-r requirements.txt
+pytest==8.3.4
+httpx==0.28.1
+ruff==0.8.4

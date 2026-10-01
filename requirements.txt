@@ -1,7 +1,11 @@
+# Copyright (c) 2026 Eduardo Correia <ecorreia@apliant.com.br>
+# SPDX-License-Identifier: LGPL-3.0-or-later
 faster-whisper==1.1.0
+# faster-whisper 1.1.0 doesn't pin PyAV, and av>=19 removed an argument it passes
+# to av.open(), breaking all audio decoding. 17.0.0 is the newest with py3.10 wheels.
+av==17.0.0
 fastapi==0.115.5
 uvicorn[standard]==0.32.0
 python-multipart==0.0.17
 structlog==24.4.0
-requests==2.32.3
 huggingface-hub<1.0
