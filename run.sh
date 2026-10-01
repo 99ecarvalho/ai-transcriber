@@ -82,7 +82,13 @@ auth_args() {
 docker_run() {
     local gpu_args=("$@")
     need docker
-    docker image inspect "$IMAGE" >/dev/null 2>&1 || docker build -t "$IMAGE" .
+    if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+        if [[ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER")" == "true" ]]; then
+            die "container '${CONTAINER}' is already running — './run.sh stop' first"
+        fi
+        docker rm "$CONTAINER" >/dev/null  # leftover from an earlier run
+    fi
+    docker build -q -t "$IMAGE" . >/dev/null  # cached layers make this quick when nothing changed
     docker run -d --name "$CONTAINER" "${gpu_args[@]}" \
         -p "${PORT}:8000" \
         -v ai-transcriber-cache:/cache \
@@ -128,7 +134,12 @@ case "$cmd" in
         ;;
     stop)
         need docker
-        docker rm -f "$CONTAINER" >/dev/null && echo "Stopped ${CONTAINER}."
+        if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+            docker rm -f "$CONTAINER" >/dev/null
+            echo "Stopped ${CONTAINER}."
+        else
+            echo "No container named ${CONTAINER}."
+        fi
         ;;
     setup)
         need python3

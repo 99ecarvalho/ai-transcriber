@@ -15,6 +15,7 @@ import os
 from dataclasses import dataclass
 
 MB = 1024 * 1024
+LOG_LEVELS = ("debug", "info", "warning", "error", "critical")  # names uvicorn accepts
 
 
 def _str(name: str, default: str | None = None) -> str | None:
@@ -78,6 +79,9 @@ class Settings:
         device = (_str("WHISPER_DEVICE", "cuda") or "cuda").lower()
         if device not in ("cuda", "cpu", "auto"):
             raise ValueError(f"WHISPER_DEVICE must be cuda, cpu or auto, got {device!r}")
+        log_level = (_str("LOG_LEVEL", "info") or "info").lower()
+        if log_level not in LOG_LEVELS:
+            raise ValueError(f"LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {log_level!r}")
 
         return cls(
             model_name=_str("WHISPER_MODEL", "large-v3"),
@@ -93,7 +97,7 @@ class Settings:
             api_key=_str("API_KEY"),
             expose_error_details=_bool("EXPOSE_ERROR_DETAILS", False),
             log_filenames=_bool("LOG_FILENAMES", False),
-            log_level=(_str("LOG_LEVEL", "info") or "info").lower(),
+            log_level=log_level,
             host=_str("HOST", "0.0.0.0"),
             port=_int("PORT", 8000, 1),
         )

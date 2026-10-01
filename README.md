@@ -154,17 +154,17 @@ All settings are environment variables, and all are optional.
 | `WHISPER_MODEL` | `large-v3` | Model name (see [Choosing a model](#choosing-a-model)) or a path to a converted model |
 | `WHISPER_DEVICE` | `cuda` | `cuda`, `cpu` or `auto` |
 | `WHISPER_COMPUTE_TYPE` | per device | `float16` on CUDA and `int8` on CPU. Also accepts `int8_float16`, `float32`, and others. GPU-only types fall back to `int8` on the CPU |
-| `WHISPER_LANGUAGE` | auto-detect | Default language code when a request doesn't set one |
+| `WHISPER_LANGUAGE` | auto-detect | Default language code when a request doesn't set one. An unsupported code stops the server at startup |
 | `WHISPER_CACHE_DIR` | `/cache/faster-whisper` | Where models are stored |
 | `WHISPER_PRELOAD` | `0` | `1` loads the model at startup rather than on the first request. Compose and `run.sh` set it to `1` |
 | `WHISPER_LOAD_RETRY_SEC` | `60` | After a failed model load, requests fail fast with a 503 for this long before another load is attempted |
 | `MAX_UPLOAD_MB` | `200` | Largest accepted request body. Bigger requests get a 413 |
-| `MAX_CONCURRENT` | `1` | Transcriptions that run at the same time. Raise it only if your GPU has spare memory |
-| `MAX_QUEUE` | `8` | Requests allowed to wait for a free slot. Beyond that the server answers 503 with `Retry-After` |
+| `MAX_CONCURRENT` | `1` | Transcriptions that run in parallel, each with its own model worker and extra memory. On a single GPU, `1` is usually fastest. On many-core CPUs, `2` or more can raise throughput. Measure on your hardware |
+| `MAX_QUEUE` | `8` | Requests allowed to wait, for a free slot or for the model to finish loading, on top of the `MAX_CONCURRENT` running ones. Beyond that the server answers 503 with `Retry-After` |
 | `API_KEY` | none | When set, every endpoint except `/health`, `/ready` and the docs requires `Authorization: Bearer <API_KEY>` |
 | `EXPOSE_ERROR_DETAILS` | `0` | `1` adds internal exception details to error messages. Useful for debugging; keep it off in public deployments |
 | `LOG_FILENAMES` | `0` | `1` logs uploaded file names, which can contain personal data |
-| `LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error` |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` or `critical` |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Address the server listens on inside the container |
 
 ## Native API

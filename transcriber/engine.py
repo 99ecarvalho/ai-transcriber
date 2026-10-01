@@ -13,12 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import structlog
 from fastapi import UploadFile
@@ -28,7 +27,6 @@ from .errors import ServiceError
 
 log = structlog.get_logger("transcriber")
 
-UPLOAD_CHUNK_BYTES = 1024 * 1024
 GPU_ONLY_COMPUTE_TYPES = {"float16", "int8_float16", "bfloat16", "int8_bfloat16"}
 
 
@@ -125,6 +123,10 @@ class TranscribeOptions:
 class ModelManager:
     """Loads the model once, lazily, off the event loop.
 
+    The load runs in its own task, so a request that is cancelled while
+    waiting doesn't abandon a half-finished load; whoever asks next gets the
+    same load (or its result).
+
     After a failed load, further attempts are refused for `load_retry_sec`
     so a broken setup (no GPU, bad model name) fails fast instead of every
     request retrying a multi-minute load.
@@ -136,14 +138,17 @@ class ModelManager:
         self.compute_type = resolve_compute_type(self.device, settings.compute_type)
         self._loader = loader or _load_whisper_model
         self._model: Any = None
-        self._lock = asyncio.Lock()
-        self.loading = False
+        self._load_task: asyncio.Task | None = None
         self.last_error: str | None = None
         self._last_error_at: float | None = None
 
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    @property
+    def loading(self) -> bool:
+        return self._load_task is not None and not self._load_task.done()
 
     @property
     def state(self) -> str:
@@ -170,43 +175,45 @@ class ModelManager:
     async def get(self) -> Any:
         if self._model is not None:
             return self._model
-        self._raise_if_cooling_down()
-        async with self._lock:
-            if self._model is not None:
-                return self._model
+        if self._load_task is None:
             self._raise_if_cooling_down()
+            self._load_task = asyncio.ensure_future(self._load())
+            # Retrieve the outcome even if every waiter was cancelled, so a
+            # failure is never reported as "exception was never retrieved".
+            self._load_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        return await asyncio.shield(self._load_task)
 
-            log.info(
-                "transcriber.loading_model",
-                model=self.settings.model_name,
-                device=self.device,
-                compute_type=self.compute_type,
-                cache_dir=self.settings.cache_dir,
-            )
-            t0 = time.monotonic()
-            self.loading = True
-            try:
-                # Download + load can take minutes — run it off the event loop so
-                # /health and other requests keep responding meanwhile.
-                model = await asyncio.to_thread(self._loader, self)
-            except Exception as e:
-                self.last_error = f"{type(e).__name__}: {e}"
-                self._last_error_at = time.monotonic()
-                log.exception("transcriber.model_load_failed")
-                raise ServiceError(
-                    503,
-                    "Failed to load model.",
-                    internal=self.last_error,
-                    retry_after=max(1, int(self.settings.load_retry_sec)),
-                ) from e
-            finally:
-                self.loading = False
+    async def _load(self) -> Any:
+        log.info(
+            "transcriber.loading_model",
+            model=self.settings.model_name,
+            device=self.device,
+            compute_type=self.compute_type,
+            num_workers=self.settings.max_concurrent,
+            cache_dir=self.settings.cache_dir,
+        )
+        t0 = time.monotonic()
+        try:
+            # Download + load can take minutes — run it off the event loop so
+            # /health and other requests keep responding meanwhile.
+            model = await asyncio.to_thread(self._loader, self)
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+            self._last_error_at = time.monotonic()
+            self._load_task = None
+            log.exception("transcriber.model_load_failed")
+            raise ServiceError(
+                503,
+                "Failed to load model.",
+                internal=self.last_error,
+                retry_after=max(1, int(self.settings.load_retry_sec)),
+            ) from e
 
-            self._model = model
-            self.last_error = None
-            self._last_error_at = None
-            log.info("transcriber.model_loaded", elapsed_sec=round(time.monotonic() - t0, 2))
-        return self._model
+        self._model = model
+        self.last_error = None
+        self._last_error_at = None
+        log.info("transcriber.model_loaded", elapsed_sec=round(time.monotonic() - t0, 2))
+        return model
 
 
 def _load_whisper_model(manager: ModelManager) -> Any:
@@ -218,46 +225,71 @@ def _load_whisper_model(manager: ModelManager) -> Any:
         device=manager.device,
         compute_type=manager.compute_type,
         download_root=manager.settings.cache_dir,
+        # One worker per allowed concurrent job; with the default of 1,
+        # concurrent transcribe() calls would run one at a time.
+        num_workers=manager.settings.max_concurrent,
     )
 
 
 # ---------- Concurrency ----------
 
-class Limiter:
-    """Bounds concurrent GPU jobs and the number of requests waiting for one.
+class Ticket:
+    """One admitted request. Released exactly once: by the request if it never
+    reaches a GPU slot, otherwise when its worker thread finishes."""
 
-    A slot is held until the worker thread actually finishes — even if the
-    client disconnects and the request is cancelled — so abandoned requests
-    can't oversubscribe the GPU.
+    def __init__(self, limiter: Limiter):
+        self._limiter = limiter
+        self._released = False
+        self._handed_to_worker = False
+
+    def release(self) -> None:
+        if self._handed_to_worker or self._released:
+            return
+        self._released = True
+        self._limiter.in_flight -= 1
+
+
+class Limiter:
+    """Bounds concurrent GPU jobs and the number of requests waiting.
+
+    At most max_concurrent + max_queue requests are admitted at once, counting
+    those waiting for the first model load, those waiting for a GPU slot and
+    those running. A slot is held until the worker thread actually finishes —
+    even if the client disconnects and the request is cancelled — so abandoned
+    requests can't oversubscribe the GPU.
     """
 
     def __init__(self, max_concurrent: int, max_queue: int):
         self.max_concurrent = max_concurrent
         self.max_queue = max_queue
         self._sem = asyncio.Semaphore(max_concurrent)
-        self.waiting = 0
+        self.in_flight = 0
         self.active = 0
 
-    async def run(self, fn: Callable[[], Any]) -> Any:
-        if self.active >= self.max_concurrent and self.waiting >= self.max_queue:
+    @property
+    def waiting(self) -> int:
+        return self.in_flight - self.active
+
+    def admit(self) -> Ticket:
+        if self.in_flight >= self.max_concurrent + self.max_queue:
             raise ServiceError(503, "Server is busy, try again later.", retry_after=5)
+        self.in_flight += 1
+        return Ticket(self)
 
-        self.waiting += 1
-        try:
-            await self._sem.acquire()
-        finally:
-            self.waiting -= 1
-
+    async def run(self, ticket: Ticket, fn: Callable[[], Any]) -> Any:
+        await self._sem.acquire()  # if cancelled here, the caller releases the ticket
         self.active += 1
+        ticket._handed_to_worker = True
         future = asyncio.ensure_future(asyncio.to_thread(fn))
 
-        def _release(f: asyncio.Future) -> None:
+        def _done(f: asyncio.Future) -> None:
             self.active -= 1
+            self.in_flight -= 1
             self._sem.release()
             if not f.cancelled():
                 f.exception()  # mark as retrieved if nobody is awaiting anymore
 
-        future.add_done_callback(_release)
+        future.add_done_callback(_done)
         return await asyncio.shield(future)
 
 
@@ -267,11 +299,12 @@ class _BadAudio(Exception):
     pass
 
 
-def _transcribe_file(model: Any, path: str, opts: TranscribeOptions) -> tuple[list[Segment], Any]:
+def _transcribe_file(model: Any, audio_file: BinaryIO, opts: TranscribeOptions) -> tuple[list[Segment], Any]:
     from faster_whisper import decode_audio
 
     try:
-        audio = decode_audio(path)
+        audio_file.seek(0)
+        audio = decode_audio(audio_file)
     except Exception as e:
         raise _BadAudio(f"{type(e).__name__}: {e}") from e
     if audio.size == 0:
@@ -309,50 +342,37 @@ def _transcribe_file(model: Any, path: str, opts: TranscribeOptions) -> tuple[li
     return segs, info
 
 
-async def _save_upload(file: UploadFile) -> tuple[str, int]:
-    # Write to a temp file because faster-whisper's decoder works best with a
-    # path (format auto-detection). Keep the suffix as a format hint. Copy in
-    # chunks so the whole upload is never held in memory.
-    suffix = Path(file.filename or "audio").suffix[:16] or ".bin"
-    size = 0
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
-                size += len(chunk)
-                tmp.write(chunk)
-    except Exception as e:
-        log.exception("transcriber.tmp_write_failed")
-        if tmp_path:
-            _unlink_quietly(tmp_path)
-        raise ServiceError(500, "Failed to store upload.", internal=f"{type(e).__name__}: {e}") from e
-    return tmp_path, size
-
-
-def _unlink_quietly(path: str) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+def _upload_size(file: UploadFile) -> int:
+    if file.size is not None:
+        return file.size
+    file.file.seek(0, os.SEEK_END)
+    return file.file.tell()
 
 
 class Transcriber:
     def __init__(self, settings: Settings, loader: Callable[[ModelManager], Any] | None = None):
+        try:
+            normalize_language(settings.default_language, None)
+        except ServiceError as e:
+            raise ValueError(f"WHISPER_LANGUAGE: {e.message}") from None
         self.settings = settings
         self.models = ModelManager(settings, loader)
         self.limiter = Limiter(settings.max_concurrent, settings.max_queue)
 
     async def transcribe_upload(self, file: UploadFile, opts: TranscribeOptions) -> TranscriptionResult:
-        tmp_path, size = await _save_upload(file)
-        try:
-            if size == 0:
-                raise ServiceError(400, "File is empty.", param="file")
+        # The multipart parser has already stored the upload (in memory when
+        # small, spooled to a temp file otherwise); decode straight from it.
+        # FFmpeg detects the format from the content, so no filename is needed.
+        size = _upload_size(file)
+        if size == 0:
+            raise ServiceError(400, "File is empty.", param="file")
 
+        ticket = self.limiter.admit()
+        try:
             model = await self.models.get()
             t0 = time.monotonic()
             try:
-                segs, info = await self.limiter.run(lambda: _transcribe_file(model, tmp_path, opts))
+                segs, info = await self.limiter.run(ticket, lambda: _transcribe_file(model, file.file, opts))
             except _BadAudio as e:
                 log.info("transcriber.bad_audio", reason=str(e), **self._file_fields(file))
                 raise ServiceError(
@@ -364,7 +384,7 @@ class Transcriber:
                 log.exception("transcriber.transcribe_failed", **self._file_fields(file))
                 raise ServiceError(500, "Transcription failed.", internal=f"{type(e).__name__}: {e}") from e
         finally:
-            _unlink_quietly(tmp_path)
+            ticket.release()
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         result = TranscriptionResult(

@@ -26,7 +26,12 @@ class ApiKeyMiddleware:
 
     def __init__(self, app, api_key: str):
         self.app = app
-        self.expected = f"Bearer {api_key}".encode()
+        self.expected = api_key.encode()
+
+    def _authorized(self, header: bytes) -> bool:
+        scheme, _, token = header.partition(b" ")
+        # The scheme name is case-insensitive (RFC 9110); the key itself is not.
+        return scheme.lower() == b"bearer" and secrets.compare_digest(token.strip(), self.expected)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
@@ -38,7 +43,7 @@ class ApiKeyMiddleware:
             if name == b"authorization":
                 provided = value
                 break
-        if not secrets.compare_digest(provided, self.expected):
+        if not self._authorized(provided):
             response = error_response(
                 scope["path"],
                 401,
